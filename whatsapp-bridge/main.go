@@ -847,8 +847,6 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
-			// Request history sync to catch up on messages missed while offline/sleeping
-			go requestHistorySync(client)
 
 		case *events.LoggedOut:
 			logger.Warnf("Device logged out, please scan QR code to log in again")
