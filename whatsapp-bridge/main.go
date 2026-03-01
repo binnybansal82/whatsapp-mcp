@@ -23,6 +23,7 @@ import (
 	"bytes"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -90,6 +91,9 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
+	// Add locked column if it doesn't exist
+	db.Exec("ALTER TABLE chats ADD COLUMN locked BOOLEAN DEFAULT 0")
+
 	return &MessageStore{db: db}, nil
 }
 
@@ -111,6 +115,14 @@ func (store *MessageStore) UpdateChatName(jid, name string) error {
 	_, err := store.db.Exec(
 		"UPDATE chats SET name = ? WHERE jid = ?",
 		name, jid,
+	)
+	return err
+}
+
+func (store *MessageStore) SetChatLocked(jid string, locked bool) error {
+	_, err := store.db.Exec(
+		"UPDATE chats SET locked = ? WHERE jid = ?",
+		locked, jid,
 	)
 	return err
 }
@@ -829,6 +841,7 @@ func main() {
 
 	// Create client instance
 	client := whatsmeow.NewClient(deviceStore, logger)
+	client.EmitAppStateEventsOnFullSync = true
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
@@ -853,9 +866,42 @@ func main() {
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
 
+		case *events.AppState:
+			if len(v.Index) >= 2 && v.Index[0] == "lock" {
+				chatJID := v.Index[1]
+				action := v.GetLockChatAction()
+				if action != nil {
+					locked := action.GetLocked()
+					// Resolve @lid JID to @s.whatsapp.net JID
+					resolvedJID := chatJID
+					parsedJID, err := types.ParseJID(chatJID)
+					if err == nil && parsedJID.Server == "lid" {
+						pn, err := client.Store.LIDs.GetPNForLID(context.Background(), parsedJID)
+						if err == nil && !pn.IsEmpty() {
+							resolvedJID = pn.String()
+						}
+					}
+					logger.Infof("Chat %s (resolved: %s) lock status changed to: %v", chatJID, resolvedJID, locked)
+					if err := messageStore.SetChatLocked(resolvedJID, locked); err != nil {
+						logger.Warnf("Failed to update lock status for %s: %v", resolvedJID, err)
+					}
+				}
+			}
+
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
 			go syncContactNames(client, messageStore, logger)
+			// Fetch app state to get current lock status for all chats
+			go func() {
+				time.Sleep(3 * time.Second)
+				logger.Infof("Fetching app state for lock status...")
+				err := client.FetchAppState(context.Background(), appstate.WAPatchRegularLow, true, false)
+				if err != nil {
+					logger.Warnf("Failed to fetch app state for lock status: %v", err)
+				} else {
+					logger.Infof("App state fetch complete")
+				}
+			}()
 
 		case *events.LoggedOut:
 			logger.Warnf("Device logged out, please scan QR code to log in again")

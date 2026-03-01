@@ -32,3 +32,6 @@ For any DEFERRED chats detected, automatically create a Google Calendar reminder
 
 ### Step 5: Present results
 Show results grouped by category (AWAITING REPLY vs DEFERRED), sorted by most recent, with conversation context.
+
+## Locked chats
+Locked chats are automatically tracked in the DB (`chats.locked = 1`). Always exclude them from queries by adding `AND c.locked = 0` or equivalent.
