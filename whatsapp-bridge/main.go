@@ -107,6 +107,14 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 	return err
 }
 
+func (store *MessageStore) UpdateChatName(jid, name string) error {
+	_, err := store.db.Exec(
+		"UPDATE chats SET name = ? WHERE jid = ?",
+		name, jid,
+	)
+	return err
+}
+
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
@@ -847,6 +855,7 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
+			go syncContactNames(client, messageStore, logger)
 
 		case *events.LoggedOut:
 			logger.Warnf("Device logged out, please scan QR code to log in again")
@@ -1003,6 +1012,42 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 	}
 
 	return name
+}
+
+func syncContactNames(client *whatsmeow.Client, messageStore *MessageStore, logger waLog.Logger) {
+	contacts, err := client.Store.Contacts.GetAllContacts(context.Background())
+	if err != nil {
+		logger.Warnf("Failed to get contacts: %v", err)
+		return
+	}
+
+	updated := 0
+	for jid, contact := range contacts {
+		// Skip locked ID contacts
+		if jid.Server == "lid" {
+			continue
+		}
+
+		name := contact.FullName
+		if name == "" {
+			name = contact.PushName
+		}
+		if name == "" {
+			name = contact.BusinessName
+		}
+		if name == "" {
+			continue
+		}
+
+		chatJID := jid.String()
+		err := messageStore.UpdateChatName(chatJID, name)
+		if err != nil {
+			logger.Warnf("Failed to update name for %s: %v", chatJID, err)
+		} else {
+			updated++
+		}
+	}
+	logger.Infof("Contact sync: updated %d names from %d contacts", updated, len(contacts))
 }
 
 // Handle history sync events
