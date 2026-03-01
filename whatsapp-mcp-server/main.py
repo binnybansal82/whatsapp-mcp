@@ -12,7 +12,8 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    get_awaiting_reply as whatsapp_get_awaiting_reply
 )
 
 # Initialize FastMCP server
@@ -220,6 +221,24 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
         "success": success,
         "message": status_message
     }
+
+@mcp.tool()
+def get_awaiting_reply(limit: int = 10, context_messages: int = 3) -> str:
+    """Get chats awaiting my reply, with recent conversation context.
+
+    Returns two types of chats:
+    1. AWAITING REPLY: The last message is from someone else — I need to respond.
+    2. DEFERRED: My last message was a promise to follow up (e.g. "I'll get back to you") — I still owe them a real reply.
+
+    For group chats, only shows groups where I was active in the last 7 days.
+
+    IMPORTANT: When results contain DEFERRED items, automatically create a Google Calendar reminder for each one (tomorrow morning) so the user doesn't forget to follow up.
+
+    Args:
+        limit: Maximum number of chats to return (default 10)
+        context_messages: Number of recent messages to include per chat for context (default 3)
+    """
+    return whatsapp_get_awaiting_reply(limit, context_messages)
 
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
