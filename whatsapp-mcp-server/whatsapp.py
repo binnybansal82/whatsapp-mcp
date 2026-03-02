@@ -141,7 +141,8 @@ def list_messages(
         # Build base query
         query_parts = ["SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
-        where_clauses = ["chats.locked = 0"]
+        # Only filter locked chats for broad queries, not when a specific chat is requested
+        where_clauses = [] if chat_jid else ["chats.locked = 0"]
         params = []
 
         # Add filters
