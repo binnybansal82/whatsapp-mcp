@@ -14,9 +14,19 @@ When the user asks about messages awaiting their reply, use the `get_chats_with_
 ### Step 1: Fetch chats with context (single call)
 Call `get_chats_with_context(only_incoming=True, since=<4 weeks ago ISO-8601>, context_messages=5)` to get all chats where the last message is from someone else, along with 5 recent messages per chat for context. Locked chats and inactive groups are automatically excluded.
 
-### Step 2: Check for deferred replies
-Also call `get_chats_with_context(only_incoming=False, since=<4 weeks ago ISO-8601>, context_messages=3)` to scan for **DEFERRED** chats — where `last_is_from_me = true` BUT the last message is a promise to follow up. Look for patterns like:
-- "I'll get back", "will get back", "let me check", "let me look into", "will follow up", "brb", "one sec", "hold on", "let me think", "I'll check", "will revert", "reply later"
+### Step 2: Check for deferred replies (MANDATORY - do not skip)
+Also call `get_chats_with_context(only_incoming=False, since=<4 weeks ago ISO-8601>, context_messages=3)` to scan for **DEFERRED** chats — where `last_is_from_me = true` BUT the last message contains a commitment to do something later. Look for:
+
+**Explicit follow-up promises:**
+- "I'll get back", "will get back", "let me check", "let me look into", "will follow up", "will let you know", "let you know by", "brb", "one sec", "hold on", "let me think", "I'll check", "will revert", "reply later", "get back to you"
+
+**Rescheduling / promises to meet:**
+- "can we meet", "let's meet", "can we do [day]", "how about [day]", "let's catch up", "let's connect", "will meet", "see you [day]", "can we reschedule", "let's do [day]", "can we push to"
+
+**General commitments:**
+- "I'll send", "will send", "I'll share", "will share", "let me find", "I'll forward", "will forward", "I'll ask", "let me ask", "I'll arrange", "will set up"
+
+Use semantic understanding — any message where I'm making a commitment to do something in the future counts as deferred, even if it doesn't match these exact phrases.
 
 ### Step 3: Categorize and prioritize
 From the results, categorize:
