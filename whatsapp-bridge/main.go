@@ -890,8 +890,8 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
-			// Request history sync to catch up on messages missed while offline/sleeping
-			go requestHistorySync(client)
+			// Request history sync to backfill chats with few stored messages
+			go requestHistorySync(client, messageStore)
 			go syncContactNames(client, messageStore, logger)
 			// Fetch app state to get current lock status for all chats
 			go func() {
@@ -1240,40 +1240,99 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
 }
 
-// Request history sync from the server
-func requestHistorySync(client *whatsmeow.Client) {
-	if client == nil {
-		fmt.Println("Client is not initialized. Cannot request history sync.")
+// Request on-demand history sync for chats that have few stored messages.
+// For each chat, finds the oldest known message and requests older history.
+func requestHistorySync(client *whatsmeow.Client, messageStore *MessageStore) {
+	if client == nil || !client.IsConnected() || client.Store.ID == nil {
+		fmt.Println("Client not ready for history sync.")
 		return
 	}
+
+	// Wait for connection to stabilize
+	time.Sleep(5 * time.Second)
 
 	if !client.IsConnected() {
-		fmt.Println("Client is not connected. Please ensure you are connected to WhatsApp first.")
+		fmt.Println("Client disconnected before history sync could start.")
 		return
 	}
 
-	if client.Store.ID == nil {
-		fmt.Println("Client is not logged in. Please scan the QR code first.")
-		return
-	}
-
-	// Build and send a history sync request
-	historyMsg := client.BuildHistorySyncRequest(nil, 100)
-	if historyMsg == nil {
-		fmt.Println("Failed to build history sync request.")
-		return
-	}
-
-	_, err := client.SendMessage(context.Background(), types.JID{
-		Server: "s.whatsapp.net",
-		User:   "status",
-	}, historyMsg)
-
+	// Query chats and their oldest message
+	rows, err := messageStore.db.Query(`
+		SELECT m.chat_jid, m.id, m.is_from_me, m.timestamp, COUNT(*) as msg_count
+		FROM messages m
+		JOIN chats c ON m.chat_jid = c.jid
+		GROUP BY m.chat_jid
+		HAVING msg_count < 20
+		ORDER BY c.last_message_time DESC
+		LIMIT 50
+	`)
 	if err != nil {
-		fmt.Printf("Failed to request history sync: %v\n", err)
-	} else {
-		fmt.Println("History sync requested. Waiting for server response...")
+		fmt.Printf("Failed to query chats for history sync: %v\n", err)
+		return
 	}
+	defer rows.Close()
+
+	type chatInfo struct {
+		jid       string
+		msgID     string
+		fromMe    bool
+		timestamp time.Time
+	}
+
+	// For each chat, find the oldest message
+	var chats []chatInfo
+	for rows.Next() {
+		var ci chatInfo
+		var msgCount int
+		if err := rows.Scan(&ci.jid, &ci.msgID, &ci.fromMe, &ci.timestamp, &msgCount); err != nil {
+			continue
+		}
+		chats = append(chats, ci)
+	}
+
+	// Now get the actual oldest message per chat
+	for _, ci := range chats {
+		var oldest chatInfo
+		oldest.jid = ci.jid
+		err := messageStore.db.QueryRow(`
+			SELECT id, is_from_me, timestamp FROM messages
+			WHERE chat_jid = ? ORDER BY timestamp ASC LIMIT 1
+		`, ci.jid).Scan(&oldest.msgID, &oldest.fromMe, &oldest.timestamp)
+		if err != nil {
+			continue
+		}
+
+		chatJID, err := types.ParseJID(oldest.jid)
+		if err != nil {
+			continue
+		}
+
+		msgInfo := &types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Chat:     chatJID,
+				IsFromMe: oldest.fromMe,
+			},
+			ID:        oldest.msgID,
+			Timestamp: oldest.timestamp,
+		}
+
+		historyMsg := client.BuildHistorySyncRequest(msgInfo, 50)
+		if historyMsg == nil {
+			continue
+		}
+
+		_, err = client.SendPeerMessage(context.Background(), historyMsg)
+		if err != nil {
+			fmt.Printf("Failed to request history for %s: %v\n", oldest.jid, err)
+		} else {
+			fmt.Printf("Requested history sync for %s (before %s)\n", oldest.jid, oldest.timestamp.Format("2006-01-02 15:04:05"))
+		}
+
+		// Rate limit to avoid flooding
+		time.Sleep(2 * time.Second)
+	}
+
+	fmt.Printf("History sync requests complete for %d chats.\n", len(chats))
 }
 
 // analyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file
