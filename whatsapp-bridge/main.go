@@ -890,6 +890,8 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
+			// Migrate any @lid JIDs from previous syncs to @s.whatsapp.net
+			go migrateLidJIDs(client, messageStore, logger)
 			// Request history sync to backfill chats with few stored messages
 			go requestHistorySync(client, messageStore)
 			go syncContactNames(client, messageStore, logger)
@@ -1118,6 +1120,19 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			continue
 		}
 
+		// Resolve @lid JID to @s.whatsapp.net JID
+		if jid.Server == "lid" {
+			pn, err := client.Store.LIDs.GetPNForLID(context.Background(), jid)
+			if err == nil && !pn.IsEmpty() {
+				logger.Infof("Resolved @lid JID %s -> %s", chatJID, pn.String())
+				chatJID = pn.String()
+				jid = pn
+			} else {
+				logger.Warnf("Could not resolve @lid JID %s, skipping conversation", chatJID)
+				continue
+			}
+		}
+
 		// Get appropriate chat name by passing the history sync conversation directly
 		name := GetChatName(client, messageStore, jid, chatJID, conversation, "", logger)
 
@@ -1182,6 +1197,14 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					}
 					if !isFromMe && msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "" {
 						sender = *msg.Message.Key.Participant
+						// Resolve @lid sender to phone number
+						senderJID, err := types.ParseJID(sender)
+						if err == nil && senderJID.Server == "lid" {
+							pn, err := client.Store.LIDs.GetPNForLID(context.Background(), senderJID)
+							if err == nil && !pn.IsEmpty() {
+								sender = pn.User
+							}
+						}
 					} else if isFromMe {
 						sender = client.Store.ID.User
 					} else {
@@ -1238,6 +1261,74 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+}
+
+// migrateLidJIDs resolves any existing @lid JIDs in the database to @s.whatsapp.net JIDs.
+// This is a one-time cleanup for data stored before @lid resolution was added to history sync.
+func migrateLidJIDs(client *whatsmeow.Client, messageStore *MessageStore, logger waLog.Logger) {
+	// Find all @lid chat JIDs
+	rows, err := messageStore.db.Query(`SELECT DISTINCT jid FROM chats WHERE jid LIKE '%@lid'`)
+	if err != nil {
+		logger.Warnf("Failed to query @lid chats for migration: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	var lidJIDs []string
+	for rows.Next() {
+		var jid string
+		if err := rows.Scan(&jid); err == nil {
+			lidJIDs = append(lidJIDs, jid)
+		}
+	}
+
+	if len(lidJIDs) == 0 {
+		return
+	}
+
+	logger.Infof("Migrating %d @lid JIDs to @s.whatsapp.net...", len(lidJIDs))
+	migrated := 0
+
+	for _, lidJID := range lidJIDs {
+		parsedJID, err := types.ParseJID(lidJID)
+		if err != nil {
+			continue
+		}
+
+		pn, err := client.Store.LIDs.GetPNForLID(context.Background(), parsedJID)
+		if err != nil || pn.IsEmpty() {
+			logger.Warnf("Could not resolve @lid JID %s, skipping", lidJID)
+			continue
+		}
+
+		pnJID := pn.String()
+		logger.Infof("Migrating @lid JID %s -> %s", lidJID, pnJID)
+
+		// Ensure the target chat exists
+		messageStore.db.Exec(`INSERT OR IGNORE INTO chats (jid, name, last_message_time) SELECT ?, name, last_message_time FROM chats WHERE jid = ?`, pnJID, lidJID)
+
+		// Migrate messages that don't already exist under the target JID
+		messageStore.db.Exec(`
+			INSERT OR IGNORE INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
+			SELECT id, ?, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length
+			FROM messages WHERE chat_jid = ?
+		`, pnJID, lidJID)
+
+		// Update last_message_time on target chat if @lid had a newer timestamp
+		messageStore.db.Exec(`
+			UPDATE chats SET last_message_time = (
+				SELECT MAX(last_message_time) FROM chats WHERE jid IN (?, ?)
+			) WHERE jid = ?
+		`, lidJID, pnJID, pnJID)
+
+		// Delete old @lid data
+		messageStore.db.Exec(`DELETE FROM messages WHERE chat_jid = ?`, lidJID)
+		messageStore.db.Exec(`DELETE FROM chats WHERE jid = ?`, lidJID)
+
+		migrated++
+	}
+
+	logger.Infof("@lid migration complete: %d/%d JIDs migrated", migrated, len(lidJIDs))
 }
 
 // Request on-demand history sync for chats that have few stored messages.
