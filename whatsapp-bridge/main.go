@@ -890,6 +890,8 @@ func main() {
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
+			// Request history sync to catch up on messages missed while offline/sleeping
+			go requestHistorySync(client)
 			go syncContactNames(client, messageStore, logger)
 			// Fetch app state to get current lock status for all chats
 			go func() {
